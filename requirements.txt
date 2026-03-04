@@ -38,3 +38,4 @@ pyyaml
 requests
 tiktoken
 bcrypt
+multidict
