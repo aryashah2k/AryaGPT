@@ -1,0 +1,35 @@
+version: "3.9"
+
+services:
+  aryagpt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aryagpt:latest
+    container_name: aryagpt
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      # API keys — override via .env file or shell environment
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - TOGETHER_API_KEY=${TOGETHER_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Admin credentials
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-arya}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - ADMIN_NAME=${ADMIN_NAME:-Arya Shah}
+    volumes:
+      # Persist ChromaDB index and SQLite DB across container restarts
+      - chroma_data:/app/chroma_db
+      - db_data:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  chroma_data:
+  db_data:

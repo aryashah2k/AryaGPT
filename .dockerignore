@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+
+# Secrets — never bake into image; pass via env vars at runtime
+.streamlit/secrets.toml
+
+# Python artifacts
+__pycache__
+*.py[cod]
+*.pyo
+*.egg-info
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Local SQLite DB (persisted via Docker volume)
+*.db
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+
+# Docs (not needed in image)
+SETUP.md
+README.md
+
+# Old project
+aryagpt-old/

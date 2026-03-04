@@ -1,2 +1,34 @@
-reviews_st_app.py
+# Secrets
+.streamlit/secrets.toml
 .env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+*.egg
+
+# ChromaDB binaries (large, committed separately via GitHub Action)
+# chroma_db/ is intentionally NOT ignored — the Action commits it
+
+# SQLite database (local only, do not commit)
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log

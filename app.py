@@ -1,190 +1,368 @@
+"""AryaGPT v2 — Main Streamlit chat UI."""
+
+from __future__ import annotations
+
 import os
-import streamlit as st
-from langchain_community.chat_models import ChatOpenAI
-from langchain.chains import ConversationalRetrievalChain
-from langchain_community.vectorstores import FAISS
-from langchain_community.document_loaders import PyPDFLoader, CSVLoader
-from langchain_community.embeddings import OpenAIEmbeddings
-# from langchain.vectorstores import Chroma
-# from langchain.prompts import PromptTemplate
-from langchain.prompts import load_prompt
-from streamlit import session_state as ss
-from pymongo import MongoClient
-from pymongo.mongo_client import MongoClient
-from pymongo.server_api import ServerApi
-import uuid
-import json
 import time
+import uuid
+from pathlib import Path
 
-import datetime
+import streamlit as st
+from langchain_core.messages import AIMessage, HumanMessage
+from streamlit_server_state import server_state, server_state_lock
 
-def is_valid_json(data):
-    try:
-        json.loads(data)
-        return True
-    except json.JSONDecodeError:
-        return False
+from admin.config import (
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_MODEL,
+    DEFAULT_PROVIDER,
+    DEFAULT_TEMPERATURE,
+)
+from agent.graph import run_agent
+from db.logger import get_recent_conversations, init_db, log_conversation, log_eval
 
+# ---------------------------------------------------------------------------
+# Page config
+# ---------------------------------------------------------------------------
 
-if "mongodB_pass" in os.environ:
-    mongodB_pass = os.getenv("mongodB_pass")
-else: mongodB_pass = st.secrets["mongodB_pass"]
-# Setting up a mongo_db connection to store conversations for deeper analysis
-uri = "mongodb+srv://aryashah0616:"+mongodB_pass+"@cluster0.jaxt0cw.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+st.set_page_config(
+    page_title="AryaGPT",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={
+        "About": "AryaGPT v2 — An agentic AI assistant for Arya Shah. Built with LangGraph + Streamlit.",
+    },
+)
 
-@st.cache_resource
-def init_connection():
-    return MongoClient(uri, server_api=ServerApi('1'))
-client = init_connection()
+# ---------------------------------------------------------------------------
+# Propagate secrets → environment variables (needed by agent LLM factory)
+# ---------------------------------------------------------------------------
 
+_SECRET_KEYS = ["GROQ_API_KEY", "TOGETHER_API_KEY", "OPENAI_API_KEY"]
+for _k in _SECRET_KEYS:
+    if _k not in os.environ:
+        try:
+            os.environ[_k] = st.secrets[_k]
+        except Exception:
+            pass
 
-db = client['conversations_db']
-conversations_collection = db['conversations']
+# ---------------------------------------------------------------------------
+# Initialise DB
+# ---------------------------------------------------------------------------
 
+init_db()
 
-if "OPENAI_API_KEY" in os.environ:
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-else: openai_api_key = st.secrets["OPENAI_API_KEY"]
-    
-# else:
-#     openai_api_key = st.sidebar.text_input(
-#         label="#### Your OpenAI API key 👇",
-#         placeholder="Paste your openAI API key, sk-",
-#         type="password")
-    
+# ---------------------------------------------------------------------------
+# Custom CSS
+# ---------------------------------------------------------------------------
 
-#Creating Streamlit title and adding additional information about the bot
-st.title("AryaGPT")
-with st.expander("⚠️Disclaimer"):
-    st.write("""This is a work in progress chatbot based on a large language model. It can answer questions about Arya Shah""")
+st.markdown(
+    """
+<style>
+/* Chat container */
+.stChatMessage { border-radius: 12px; padding: 4px 8px; }
 
-path = os.path.dirname(__file__)
+/* User bubble */
+[data-testid="stChatMessageContent"][class*="user"] {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border-radius: 18px 18px 4px 18px;
+}
 
+/* Assistant bubble */
+[data-testid="stChatMessageContent"][class*="assistant"] {
+    background: #1e1e2e;
+    border: 1px solid #313244;
+    border-radius: 18px 18px 18px 4px;
+}
 
-# Loading prompt to query openai
-prompt_template = path+"/templates/template.json"
-prompt = load_prompt(prompt_template)
-#prompt = template.format(input_parameter=user_input)
+/* Sidebar header */
+.sidebar-header {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #cba6f7;
+    margin-bottom: 0.5rem;
+}
 
-# loading embedings
-faiss_index = path+"/faiss_index"
+/* Source badge */
+.source-badge {
+    display: inline-block;
+    background: #313244;
+    color: #cdd6f4;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    margin: 2px;
+}
 
-# Loading CSV file
-data_source = path+"/data/about_me.csv"
-pdf_source = path+"/data/resume.pdf"
+/* Welcome card */
+.welcome-card {
+    background: linear-gradient(135deg, #1e1e2e 0%, #181825 100%);
+    border: 1px solid #45475a;
+    border-radius: 16px;
+    padding: 1.5rem 2rem;
+    margin-bottom: 1.5rem;
+}
 
-# Function to store conversation
-def store_conversation(conversation_id, user_message, bot_message, answered):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data = {
-        "conversation_id": conversation_id,
-        "timestamp": timestamp,
-        "user_message": user_message,
-        "bot_message": bot_message,
-        "answered": answered
-    }
-    conversations_collection.insert_one(data)
+/* Metric pill */
+.metric-pill {
+    background: #313244;
+    border-radius: 8px;
+    padding: 4px 10px;
+    font-size: 0.78rem;
+    color: #a6e3a1;
+    display: inline-block;
+    margin-right: 4px;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
-embeddings = OpenAIEmbeddings()
+# ---------------------------------------------------------------------------
+# Session state initialisation
+# ---------------------------------------------------------------------------
 
-#using FAISS as a vector DB
-if os.path.exists(faiss_index):
-        vectors = FAISS.load_local(faiss_index, embeddings,allow_dangerous_deserialization=True)
-else:
-    # Creating embeddings for the docs
-    if data_source:
-        # Load data from PDF and CSV sources
-        pdf_loader = PyPDFLoader(pdf_source)
-        pdf_data = pdf_loader.load_and_split()
-        print(pdf_data)
-        csv_loader = CSVLoader(file_path=data_source, encoding="utf-8")
-        #loader.
-        csv_data = csv_loader.load()
-        data = pdf_data + csv_data
-        vectors = FAISS.from_documents(data, embeddings)
-        vectors.save_local("faiss_index")
-
-retriever=vectors.as_retriever(search_type="similarity", search_kwargs={"k":6, "include_metadata":True, "score_threshold":0.6})
-#Creating langchain retreval chain 
-chain = ConversationalRetrievalChain.from_llm(llm = ChatOpenAI(temperature=0.0,model_name='gpt-3.5-turbo', openai_api_key=openai_api_key), 
-                                                retriever=retriever,return_source_documents=True,verbose=True,chain_type="stuff",
-                                                max_tokens_limit=4097, combine_docs_chain_kwargs={"prompt": prompt})
-
-
-def conversational_chat(query):
-    with st.spinner("Thinking..."):
-        # time.sleep(1)
-        # Be conversational and ask a follow up questions to keep the conversation going"
-        result = chain({"system": 
-        "You are a Arya's ResumeGPT chatbot, a comprehensive, interactive resource for exploring Arya Shah's background, skills, and expertise. Be polite and provide answers based on the provided context only. Use only the provided data and not prior knowledge.", 
-                        "question": query, 
-                        "chat_history": st.session_state['history']})
-    
-    if (is_valid_json(result["answer"])):              
-        data = json.loads(result["answer"])
-    else:
-        data = json.loads('{"answered":"false", "response":"Hmm... Something is not right. I\'m experiencing technical difficulties. Try asking your question again or ask another question about Arya Shah\'s professional background and qualifications. Thank you for your understanding.", "questions":["What is Arya\'s professional experience?","What projects has Arya worked on?","What are Arya\'s career goals?"]}')
-    # Access data fields
-    answered = data.get("answered")
-    response = data.get("response")
-    questions = data.get("questions")
-
-    full_response="--"
-
-    st.session_state['history'].append((query, response))
-    
-    if ('I am tuned to only answer questions' in response) or (response == ""):
-        full_response = """Unfortunately, I can't answer this question. My capabilities are limited to providing information about Arya Shah's professional background and qualifications. If you have other inquiries, I recommend reaching out to Arya on [LinkedIn](https://www.linkedin.com/in/arya--shah/). I can answer questions like: \n - What is Arya Shah's educational background? \n - Can you list Arya Shah's professional experience? \n - What skills does Arya Shah possess? \n"""
-        store_conversation(st.session_state["uuid"], query, full_response, answered)
-        
-    else: 
-        markdown_list = ""
-        for item in questions:
-            markdown_list += f"- {item}\n"
-        full_response = response + "\n\n What else would you like to know about Arya? You can ask me: \n" + markdown_list
-        store_conversation(st.session_state["uuid"], query, full_response, answered)
-    return(full_response)
-
-if "uuid" not in st.session_state:
-    st.session_state["uuid"] = str(uuid.uuid4())
-
-if "openai_model" not in st.session_state:
-    st.session_state["openai_model"] = "gpt-3.5-turbo"
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
 
-        welcome_message = """
-            Welcome! I'm **AryaGPT**, specialized in providing information about Arya Shah's professional background and qualifications. Feel free to ask me questions such as:
+if "lc_history" not in st.session_state:
+    st.session_state.lc_history = []
 
-            - What is Arya Shah's educational background?
-            - Can you outline Arya Shah's professional experience?
-            - What skills and expertise does Arya Shah bring to the table?
+if "show_sources" not in st.session_state:
+    st.session_state.show_sources = True
 
-            I'm here to assist you. What would you like to know?
-            """
-        message_placeholder.markdown(welcome_message)
-        
+if "last_latency" not in st.session_state:
+    st.session_state.last_latency = None
 
-if 'history' not in st.session_state:
-    st.session_state['history'] = []
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# ---------------------------------------------------------------------------
+# Track active sessions via server_state
+# ---------------------------------------------------------------------------
 
-if prompt := st.chat_input("Ask me about Arya Shah"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        
-        user_input=prompt
-        st.markdown(prompt)
+with server_state_lock["active_sessions"]:
+    if "active_sessions" not in server_state:
+        server_state.active_sessions = set()
+    server_state.active_sessions = server_state.active_sessions | {st.session_state.session_id}
 
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        full_response = ""
-        full_response = conversational_chat(user_input)
-        message_placeholder.markdown(full_response)
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+def _get_active_provider() -> str:
+    try:
+        return server_state.get("active_provider", DEFAULT_PROVIDER)
+    except Exception:
+        return DEFAULT_PROVIDER
+
+
+def _get_active_model() -> str:
+    try:
+        return server_state.get("active_model", DEFAULT_MODEL)
+    except Exception:
+        return DEFAULT_MODEL
+
+
+def _get_active_temperature() -> float:
+    try:
+        return float(server_state.get("active_temperature", DEFAULT_TEMPERATURE))
+    except Exception:
+        return DEFAULT_TEMPERATURE
+
+
+def _get_active_max_tokens() -> int:
+    try:
+        return int(server_state.get("active_max_tokens", DEFAULT_MAX_TOKENS))
+    except Exception:
+        return DEFAULT_MAX_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    st.markdown("## 🤖 AryaGPT")
+    st.caption("An agentic AI assistant for Arya Shah")
+    st.divider()
+
+    # KB status
+    st.markdown('<div class="sidebar-header">📚 Knowledge Base</div>', unsafe_allow_html=True)
+    meta_path = Path("chroma_db") / "ingest_meta.json"
+    if meta_path.exists():
+        import json
+        with open(meta_path) as f:
+            kb_meta = json.load(f)
+        st.success(f"✅ {kb_meta.get('total_chunks', '?')} chunks indexed")
+        st.caption(f"Last updated: {kb_meta.get('last_ingest_human', 'unknown')}")
+    else:
+        st.warning("⚠️ Knowledge base not yet built. Run ingest first.")
+
+    st.divider()
+
+    # Active provider info
+    provider = _get_active_provider()
+    model = _get_active_model()
+    provider_display = {"groq": "Groq ⚡", "together": "Together AI 🤝", "openai": "OpenAI 🌐"}.get(provider, provider)
+    st.markdown('<div class="sidebar-header">⚙️ Active Model</div>', unsafe_allow_html=True)
+    st.info(f"**{provider_display}**\n\n`{model}`")
+
+    st.divider()
+
+    # UI controls
+    st.markdown('<div class="sidebar-header">🎛️ Display Options</div>', unsafe_allow_html=True)
+    st.session_state.show_sources = st.toggle("Show source citations", value=st.session_state.show_sources)
+
+    if st.session_state.last_latency:
+        st.divider()
+        st.markdown('<div class="sidebar-header">📊 Last Response</div>', unsafe_allow_html=True)
+        lat = st.session_state.last_latency
+        st.markdown(
+            f'<span class="metric-pill">⏱ Total: {lat["total_ms"]:.0f}ms</span>'
+            f'<span class="metric-pill">🔍 Retrieval: {lat["retrieval_ms"]:.0f}ms</span>'
+            f'<span class="metric-pill">🤖 LLM: {lat["llm_ms"]:.0f}ms</span>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    if st.button("🗑️ Clear conversation"):
+        st.session_state.messages = []
+        st.session_state.lc_history = []
+        st.session_state.last_latency = None
+        st.rerun()
+
+    st.divider()
+    st.markdown(
+        "**Arya Shah** — Software Engineer & AI/ML enthusiast\n\n"
+        "📧 [aryaforhire@gmail.com](mailto:aryaforhire@gmail.com)\n\n"
+        "💼 [LinkedIn](https://www.linkedin.com/in/arya--shah/)\n\n"
+        "💻 [GitHub](https://github.com/aryashah2k)",
+        unsafe_allow_html=False,
+    )
+
+# ---------------------------------------------------------------------------
+# Main chat area
+# ---------------------------------------------------------------------------
+
+st.title("🤖 AryaGPT")
+
+# Welcome message
+if not st.session_state.messages:
+    st.markdown(
+        """
+<div class="welcome-card">
+<h3>👋 Welcome! I'm AryaGPT</h3>
+<p>I'm an agentic AI assistant specialized in answering questions about <strong>Arya Shah</strong> — 
+his background, education, work experience, projects, research, and more.</p>
+
+<p><strong>Try asking me:</strong></p>
+<ul>
+<li>🎓 What is Arya's educational background?</li>
+<li>💼 Tell me about his work experience at ZS Associates</li>
+<li>🔬 What research papers has he published?</li>
+<li>🏆 Can you create an elevator pitch about Arya for a fintech startup?</li>
+<li>💻 What are his latest GitHub projects?</li>
+<li>📜 List Arya's patents</li>
+</ul>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+# Render chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"], avatar="🧑‍💼" if msg["role"] == "user" else "🤖"):
+        st.markdown(msg["content"])
+        if msg["role"] == "assistant" and msg.get("sources") and st.session_state.show_sources:
+            badges = "".join(
+                f'<span class="source-badge">📄 {src}</span>' for src in msg["sources"]
+            )
+            st.markdown(f"<div style='margin-top:8px'>{badges}</div>", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# Chat input
+# ---------------------------------------------------------------------------
+
+if user_input := st.chat_input("Ask me about Arya Shah…"):
+    # Display user message
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user", avatar="🧑‍💼"):
+        st.markdown(user_input)
+
+    # Run agent
+    with st.chat_message("assistant", avatar="🤖"):
+        with st.spinner("Thinking…"):
+            try:
+                result = run_agent(
+                    user_message=user_input,
+                    chat_history=st.session_state.lc_history,
+                    provider=_get_active_provider(),
+                    model=_get_active_model(),
+                    temperature=_get_active_temperature(),
+                    max_tokens=_get_active_max_tokens(),
+                    conversation_id=st.session_state.session_id,
+                )
+                answer = result["answer"]
+                sources = result.get("sources", [])
+                total_ms = result.get("total_latency_ms", 0)
+                retrieval_ms = result.get("retrieval_latency_ms", 0)
+                llm_ms = result.get("llm_latency_ms", 0)
+
+            except Exception as e:
+                answer = (
+                    f"I encountered an error while processing your request: `{e}`\n\n"
+                    "Please check that the API keys are configured correctly in the admin panel."
+                )
+                sources = []
+                total_ms = retrieval_ms = llm_ms = 0
+
+        st.markdown(answer)
+
+        if sources and st.session_state.show_sources:
+            badges = "".join(
+                f'<span class="source-badge">📄 {src}</span>' for src in sources
+            )
+            st.markdown(f"<div style='margin-top:8px'>{badges}</div>", unsafe_allow_html=True)
+
+    # Update state
+    st.session_state.messages.append(
+        {"role": "assistant", "content": answer, "sources": sources}
+    )
+    st.session_state.lc_history.append(HumanMessage(content=user_input))
+    st.session_state.lc_history.append(AIMessage(content=answer))
+
+    st.session_state.last_latency = {
+        "total_ms": total_ms,
+        "retrieval_ms": retrieval_ms,
+        "llm_ms": llm_ms,
+    }
+
+    # Log to SQLite
+    try:
+        log_conversation(
+            session_id=st.session_state.session_id,
+            user_msg=user_input,
+            bot_msg=answer,
+            provider=_get_active_provider(),
+            model=_get_active_model(),
+            sources=sources,
+            retrieval_ms=retrieval_ms,
+            llm_ms=llm_ms,
+            total_ms=total_ms,
+        )
+        log_eval(
+            session_id=st.session_state.session_id,
+            query=user_input,
+            retrieval_ms=retrieval_ms,
+            llm_ms=llm_ms,
+            total_ms=total_ms,
+            provider=_get_active_provider(),
+            model=_get_active_model(),
+            chunks_returned=len(sources),
+            answer_length=len(answer),
+        )
+    except Exception:
+        pass
+
+    st.rerun()

@@ -1,8 +1,40 @@
-openai==1.30.3
-langchain==0.2.1
-langchain-community==0.2.1
-tiktoken
-pandas
-faiss-cpu==1.8.0
-pymongo==4.6.2
+# LLM / routing
+litellm
+groq
+openai
+
+# LangChain / LangGraph
+langchain
+langchain-community
+langchain-groq
+langchain-openai
+langgraph
+
+# Embeddings & reranking (local, no API key)
+sentence-transformers
+
+# Vector store
+chromadb
+
+# Document loaders
 pypdf
+pandas
+unstructured
+
+# Web search (no API key)
+ddgs
+
+# Streamlit + UI
+streamlit
+streamlit-authenticator
+streamlit-server-state
+
+# Database
+# (SQLite is stdlib — no extra package needed)
+
+# Utilities
+python-dotenv
+pyyaml
+requests
+tiktoken
+bcrypt
