@@ -1,7 +1,7 @@
 {
-  "last_ingest_ts": 1772621721.3428197,
-  "last_ingest_human": "2026-03-04 10:55:21 UTC",
+  "last_ingest_ts": 1772630207.1034598,
+  "last_ingest_human": "2026-03-04 13:16:47 UTC",
   "total_chunks": 13,
-  "last_added": 13,
-  "last_skipped": 0
+  "last_added": 0,
+  "last_skipped": 13
 }
