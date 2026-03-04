@@ -35,14 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            sentence-transformers==3.2.1 \
-            chromadb==0.5.20 \
-            langchain==0.3.7 \
-            langchain-community==0.3.7 \
-            pypdf==5.1.0 \
-            pandas==2.2.3 \
-            tiktoken==0.8.0
+          pip install -r requirements.txt
 
       - name: Run ingest pipeline
         run: python scripts/ingest.py --data-dir data/ --chroma-dir chroma_db/
